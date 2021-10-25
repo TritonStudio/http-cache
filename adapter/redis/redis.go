@@ -25,7 +25,7 @@ SOFTWARE.
 package redis
 
 import (
-	cache "github.com/Columbus-internet/http-cache"
+	cache "github.com/TritonStudio/http-cache"
 	"github.com/go-redis/redis"
 )
 
