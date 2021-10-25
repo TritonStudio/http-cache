@@ -25,60 +25,72 @@ SOFTWARE.
 package redis
 
 import (
-	"strconv"
-	"time"
-
-	cache "github.com/TritonStudio/http-cache"
-	redisCache "github.com/go-redis/cache"
+	cache "github.com/Columbus-internet/http-cache"
 	"github.com/go-redis/redis"
-	"github.com/vmihailenco/msgpack"
 )
 
 // Adapter is the memory adapter data structure.
 type Adapter struct {
-	store *redisCache.Codec
+	ring *redis.Ring
 }
 
 // RingOptions exports go-redis RingOptions type.
 type RingOptions redis.RingOptions
 
 // Get implements the cache Adapter interface Get method.
-func (a *Adapter) Get(key uint64) ([]byte, bool) {
-	var c []byte
-	if err := a.store.Get(strconv.FormatUint(key, 10), &c); err == nil {
+func (a *Adapter) Get(prefix, key string) ([]byte, bool) {
+	if c, err := a.ring.HGet(prefix, key).Bytes(); err == nil {
 		return c, true
 	}
-
 	return nil, false
 }
 
+// Exists ...
+func (a *Adapter) Exists(prefix, key string) bool {
+	if c, err := a.ring.HExists(prefix, key).Result(); err == nil {
+		return c
+	}
+	return false
+}
+
 // Set implements the cache Adapter interface Set method.
-func (a *Adapter) Set(key uint64, response []byte, expiration time.Time) {
-	a.store.Set(&redisCache.Item{
-		Key:        strconv.FormatUint(key, 10),
-		Object:     response,
-		Expiration: expiration.Sub(time.Now()),
-	})
+func (a *Adapter) Set(prefix, key string, response []byte) {
+	a.ring.HSet(prefix, key, response)
 }
 
 // Release implements the cache Adapter interface Release method.
-func (a *Adapter) Release(key uint64) {
-	a.store.Delete(strconv.FormatUint(key, 10))
+func (a *Adapter) Release(prefix, key string) {
+	a.ring.HDel(prefix, key)
+}
+
+// ReleasePrefix ...
+func (a *Adapter) ReleasePrefix(prefix string) {
+	a.ring.Del(prefix)
+}
+
+// ReleaseIfStartsWith ...
+func (a *Adapter) ReleaseIfStartsWith(key string) {
+
+	for {
+		var keys []string
+		var cursor uint64
+		//var err error
+		keys, cursor, _ = a.ring.Scan(cursor, key+"*", 100).Result()
+
+		for idx := range keys {
+			a.ring.Del(keys[idx])
+		}
+
+		if cursor == 0 {
+			break
+		}
+	}
 }
 
 // NewAdapter initializes Redis adapter.
 func NewAdapter(opt *RingOptions) cache.Adapter {
 	ropt := redis.RingOptions(*opt)
 	return &Adapter{
-		&redisCache.Codec{
-			Redis: redis.NewRing(&ropt),
-			Marshal: func(v interface{}) ([]byte, error) {
-				return msgpack.Marshal(v)
-
-			},
-			Unmarshal: func(b []byte, v interface{}) error {
-				return msgpack.Unmarshal(b, v)
-			},
-		},
+		ring: redis.NewRing(&ropt),
 	}
 }
