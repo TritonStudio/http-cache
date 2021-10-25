@@ -4,8 +4,6 @@ import (
 	"reflect"
 	"testing"
 	"time"
-
-	"github.com/victorspringer/http-cache"
 )
 
 var a cache.Adapter

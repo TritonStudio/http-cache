@@ -28,7 +28,7 @@ import (
 	"strconv"
 	"time"
 
-	cache "github.com/Columbus-internet/http-cache"
+	cache "github.com/Triton/http-cache"
 	redisCache "github.com/go-redis/cache"
 	"github.com/go-redis/redis"
 	"github.com/vmihailenco/msgpack"
