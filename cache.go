@@ -34,8 +34,11 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // Response is the cached response data structure.
@@ -56,13 +59,16 @@ type Response struct {
 	// Frequency is the count of times a cached response is accessed.
 	// Used for LFU and MFU algorithms.
 	Frequency int
+
+	CachedAt time.Time
 }
 
 // Client data structure for HTTP cache middleware.
 type Client struct {
-	Adapter    Adapter
+	adapter    Adapter
 	ttl        time.Duration
 	refreshKey string
+	log        *log.Logger
 }
 
 // ClientOption is used to set Client settings.
@@ -72,78 +78,142 @@ type ClientOption func(c *Client) error
 type Adapter interface {
 	// Get retrieves the cached response by a given key. It also
 	// returns true or false, whether it exists or not.
-	Get(key uint64) ([]byte, bool)
+	Get(prefix, key string) ([]byte, bool)
 
-	// Set caches a response for a given key until an expiration date.
-	Set(key uint64, response []byte, expiration time.Time)
+	Exists(prefix, key string) bool
+
+	Set(prefix, key string, response []byte)
 
 	// Release frees cache for a given key.
-	Release(key uint64)
+	Release(prefix, key string)
+
+	ReleasePrefix(prefix string)
+	ReleaseIfStartsWith(key string)
 }
 
 // Middleware is the HTTP cache middleware handler.
 func (c *Client) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" || r.Method == "" {
-			sortURLParams(r.URL)
-			key := GenerateKey(r.URL.String())
-
+			prefix, key := c.GeneratePrefixAndKey(r)
+			ctxlog := c.log.WithFields(log.Fields{"prefix": prefix, "key": key})
 			params := r.URL.Query()
 			if _, ok := params[c.refreshKey]; ok {
+				ctxlog.Debug("refresh key found, releasing")
 				delete(params, c.refreshKey)
 
 				r.URL.RawQuery = params.Encode()
-				key = GenerateKey(r.URL.String())
+				key = generateKey(r.URL.String())
 
-				c.Adapter.Release(key)
+				c.adapter.Release(prefix, key)
 			} else {
-				b, ok := c.Adapter.Get(key)
+				b, ok := c.adapter.Get(prefix, key)
 				response := BytesToResponse(b)
 				if ok {
 					if response.Expiration.After(time.Now()) {
+						ctxlog.Debug("serving from cache")
 						response.LastAccess = time.Now()
 						response.Frequency++
-						c.Adapter.Set(key, response.Bytes(), response.Expiration)
+						c.adapter.Set(prefix, key, response.Bytes())
 
 						//w.WriteHeader(http.StatusNotModified)
 						for k, v := range response.Header {
 							w.Header().Set(k, strings.Join(v, ","))
 						}
+						w.Header().Set("X-Cached-At", response.CachedAt.Format(time.RFC822Z))
 						w.Write(response.Value)
 						return
 					}
-
-					c.Adapter.Release(key)
+					ctxlog.Debug("requested object is in cache, but expried - releasing")
+					c.adapter.Release(prefix, key)
 				}
 			}
-
-			rec := httptest.NewRecorder()
-			next.ServeHTTP(rec, r)
-			result := rec.Result()
-
-			statusCode := result.StatusCode
-			value := rec.Body.Bytes()
-			if statusCode < 400 {
-				now := time.Now()
-
-				response := Response{
-					Value:      value,
-					Header:     result.Header,
-					Expiration: now.Add(c.ttl),
-					LastAccess: now,
-					Frequency:  1,
-				}
-				c.Adapter.Set(key, response.Bytes(), response.Expiration)
-			}
-			for k, v := range result.Header {
+			ctxlog.Debug("requested object is not in cache or expired - taking it from DB")
+			response, value := c.PutItemToCache(next, r, prefix, key)
+			for k, v := range response.Header {
 				w.Header().Set(k, strings.Join(v, ","))
 			}
-			w.WriteHeader(statusCode)
+			w.Header().Set("X-Cached-At", time.Now().Format(time.RFC822Z))
+			w.WriteHeader(response.StatusCode)
 			w.Write(value)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// GeneratePrefixAndKey ...
+func (c *Client) GeneratePrefixAndKey(r *http.Request) (prefix, key string) {
+	sortURLParams(r.URL)
+	prefix = r.URL.Path
+	key = generateKey(r.URL.String())
+	return
+}
+
+// PutItemToCache ...
+func (c *Client) PutItemToCache(next http.Handler, r *http.Request, prefix, key string) (result *http.Response, value []byte) {
+	ctxlog := c.log.WithFields(log.Fields{"prefix": prefix, "key": key, "resource": r.URL.String()})
+	ctxlog.Trace("calling http recorder")
+	rec := httptest.NewRecorder()
+	next.ServeHTTP(rec, r)
+	result = rec.Result()
+
+	statusCode := result.StatusCode
+	ctxlog.Data["status"] = statusCode
+
+	if result.StatusCode == http.StatusNotFound {
+		ctxlog.Trace("the item is NotFound now, removing it from cache")
+		c.adapter.Release(prefix, key)
+		return
+	}
+	value = rec.Body.Bytes()
+	if statusCode < 400 {
+		ctxlog.Trace("all fine")
+		now := time.Now()
+
+		response := Response{
+			Value:      value,
+			Header:     result.Header,
+			Expiration: now.Add(c.ttl),
+			LastAccess: now,
+			Frequency:  1,
+			CachedAt:   now,
+		}
+		c.adapter.Set(prefix, key, response.Bytes())
+	} else {
+		ctxlog.Data["value"] = string(value)
+		ctxlog.Trace("got error")
+	}
+	return
+}
+
+// Exists ...
+func (c *Client) Exists(uri string) bool {
+	url, _ := url.Parse(uri)
+	sortURLParams(url)
+	prefix := url.Path
+	key := generateKey(url.String())
+
+	return c.adapter.Exists(prefix, key)
+}
+
+// ReleaseURI ...
+func (c *Client) ReleaseURI(uri string) {
+	c.adapter.ReleasePrefix(uri)
+}
+
+// ReleaseIfStartsWith ...
+func (c *Client) ReleaseIfStartsWith(uri string) {
+	c.adapter.ReleaseIfStartsWith(uri)
+}
+
+// Release ...
+func (c *Client) Release(uri string) {
+	url, _ := url.Parse(uri)
+	sortURLParams(url)
+	prefix := url.Path
+	key := generateKey(url.String())
+	c.adapter.Release(prefix, key)
 }
 
 // BytesToResponse converts bytes array into Response data structure.
@@ -174,17 +244,18 @@ func sortURLParams(URL *url.URL) {
 	URL.RawQuery = params.Encode()
 }
 
-func GenerateKey(URL string) uint64 {
+func generateKey(URL string) string {
 	hash := fnv.New64a()
 	hash.Write([]byte(URL))
 
-	return hash.Sum64()
+	return strconv.FormatUint(hash.Sum64(), 10)
 }
 
 // NewClient initializes the cache HTTP middleware client with the given
 // options.
 func NewClient(opts ...ClientOption) (*Client, error) {
 	c := &Client{}
+	c.log = log.StandardLogger()
 
 	for _, opt := range opts {
 		if err := opt(c); err != nil {
@@ -192,7 +263,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 		}
 	}
 
-	if c.Adapter == nil {
+	if c.adapter == nil {
 		return nil, errors.New("cache client adapter is not set")
 	}
 	if int64(c.ttl) < 1 {
@@ -206,7 +277,7 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 // middleware client.
 func ClientWithAdapter(a Adapter) ClientOption {
 	return func(c *Client) error {
-		c.Adapter = a
+		c.adapter = a
 		return nil
 	}
 }
@@ -229,6 +300,14 @@ func ClientWithTTL(ttl time.Duration) ClientOption {
 func ClientWithRefreshKey(refreshKey string) ClientOption {
 	return func(c *Client) error {
 		c.refreshKey = refreshKey
+		return nil
+	}
+}
+
+// ClientWithLogger ...
+func ClientWithLogger(logger *log.Logger) ClientOption {
+	return func(c *Client) error {
+		c.log = logger
 		return nil
 	}
 }
