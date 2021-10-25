@@ -1,9 +1,8 @@
-module http-cache
+module github.com/TritonStudio/http-cache
 
 go 1.17
 
 require (
-	github.com/TritonStudio/http-cache v0.0.0-20190925121450-9fc5fbc41c27
 	github.com/allegro/bigcache v1.2.1
 	github.com/go-redis/redis v6.15.9+incompatible
 	github.com/sirupsen/logrus v1.8.1

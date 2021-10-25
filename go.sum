@@ -1,5 +1,3 @@
-github.com/Columbus-internet/http-cache v0.0.0-20190925121450-9fc5fbc41c27 h1:gHmNiyvLpEu/13q0oCG2UTONS43VVQ4zApIkvHX5XSY=
-github.com/Columbus-internet/http-cache v0.0.0-20190925121450-9fc5fbc41c27/go.mod h1:WI0HxnnQexrz3/4OOKJnd/EY/FMEHIAee3BaQ9I8lRA=
 github.com/allegro/bigcache v1.2.1 h1:hg1sY1raCwic3Vnsvje6TT7/pnZba83LeFck5NrFKSc=
 github.com/allegro/bigcache v1.2.1/go.mod h1:Cb/ax3seSYIx7SuZdm2G2xzfwmv3TPSk2ucNfQESPXM=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
